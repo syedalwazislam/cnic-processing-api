@@ -2,17 +2,13 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Copy requirements first
 COPY api/requirements.txt .
-
-# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all API files
 COPY api/ .
 
-# Expose port
-EXPOSE 8000
+# Use environment variable with default
+ENV PORT=8000
 
-# Run the application
-CMD ["python", "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run with the environment variable
+CMD sh -c "uvicorn api:app --host 0.0.0.0 --port $PORT"
