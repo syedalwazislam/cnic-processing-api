@@ -14,6 +14,11 @@ import redis
 import json
 import uuid
 
+from fastapi.middleware.cors import CORSMiddleware
+
+# Add this right after `app = FastAPI(...)` line:
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -42,6 +47,13 @@ except Exception as e:
 # App & Models
 # ---------------------------------------------------------------------------
 app = FastAPI(title="CNIC Processing API (Lightweight)", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],       # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],       # Allow all HTTP methods
+    allow_headers=["*"],       # Allow all headers
+)
 
 class TaskResponse(BaseModel):
     task_id: str
