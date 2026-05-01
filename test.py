@@ -1,222 +1,235 @@
+"""
+Test script for:
+  1. /extract-cnic-back  — CNIC back-side address extraction
+  2. /verify-face        — Face verification (CNIC photo vs selfie)
+
+Usage:
+  python test_endpoints.py --back   <cnic_back_image>
+  python test_endpoints.py --verify <cnic_front_image> <selfie_image>
+  python test_endpoints.py --all    <cnic_back_image> <cnic_front_image> <selfie_image>
+"""
+
 import requests
-import base64
 import time
 import json
 import sys
+import os
+import argparse
+from typing import Optional
 
-# ===== CONFIGURATION =====
-# Replace with your actual Railway API URL
-API_URL = "https://cnic-processing-api-production.up.railway.app"  # ← CHANGE THIS
+API_URL = "https://cnic-processing-api-production.up.railway.app"
+POLL_INTERVAL = 2    # seconds between status checks
+MAX_WAIT      = 90   # seconds before giving up
 
-def test_health():
-    """Test if API is reachable"""
-    print("🔍 Checking API health...")
+
+# ─────────────────────────────── helpers ───────────────────────────────────
+
+def check_health():
+    print("=" * 55)
+    print("  Health Check")
+    print("=" * 55)
     try:
-        response = requests.get(f"{API_URL}/health", timeout=5)
-        print(f"✅ API is running: {response.status_code}")
-        print(f"   Response: {response.json()}")
-        return True
+        r = requests.get(f"{API_URL}/health", timeout=10)
+        h = r.json()
+        print(f"  API    : {h.get('status', '?')}")
+        print(f"  Redis  : {h.get('redis', '?')}")
+        print(f"  Service: {h.get('service', '?')}")
+        print()
+        return h.get("redis") == "connected"
     except Exception as e:
-        print(f"❌ Cannot reach API: {e}")
+        print(f"  ❌ Health check failed: {e}")
         return False
 
-def test_extract_cnic(image_path):
-    """Test CNIC extraction end-to-end"""
-    
-    print("\n" + "="*50)
-    print("📸 Testing CNIC Extraction")
-    print("="*50)
-    
-    # Check if image exists
-    try:
-        with open(image_path, 'rb') as f:
-            image_data = f.read()
-        print(f"✅ Loaded image: {image_path} ({len(image_data)} bytes)")
-    except Exception as e:
-        print(f"❌ Cannot read image: {e}")
-        return None
-    
-    # Step 1: Submit task to API
-    print("\n📤 Submitting task to API...")
-    files = {'cnic_image': ('cnic.jpg', image_data, 'image/jpeg')}
-    
-    try:
-        response = requests.post(f"{API_URL}/extract-cnic", files=files, timeout=10)
-        
-        if response.status_code != 200:
-            print(f"❌ API error: {response.status_code}")
-            print(f"   Response: {response.text}")
-            return None
-        
-        task = response.json()
-        task_id = task.get('task_id')
-        print(f"✅ Task submitted!")
-        print(f"   Task ID: {task_id}")
-        print(f"   Status: {task.get('status')}")
-        
-    except Exception as e:
-        print(f"❌ Failed to submit: {e}")
-        return None
-    
-    # Step 2: Poll for results
-    print("\n⏳ Waiting for worker to process...")
-    print("   (Check Hugging Face logs for progress)")
-    
-    max_attempts = 30  # 60 seconds max
-    for i in range(max_attempts):
-        time.sleep(2)
-        
+
+def poll_result(task_id: str, label: str) -> Optional[dict]:
+    """Poll /result/{task_id} until completed/failed or timeout."""
+    print(f"\n⏳ Polling for result ({label}) — task: {task_id}")
+    deadline = time.time() + MAX_WAIT
+
+    for i in range(1, 999):
+        time.sleep(POLL_INTERVAL)
         try:
-            result_response = requests.get(f"{API_URL}/result/{task_id}", timeout=5)
-            
-            if result_response.status_code == 200:
-                result = result_response.json()
-                status = result.get('status')
-                
-                print(f"   Attempt {i+1}: Status = {status}")
-                
-                if status == 'completed':
-                    print("\n" + "="*50)
-                    print("✅ TASK COMPLETED SUCCESSFULLY!")
-                    print("="*50)
-                    
-                    # Print extracted data
-                    result_data = result.get('result', {})
-                    fields = result_data.get('fields', {})
-                    
-                    if fields:
-                        print("\n📋 EXTRACTED CNIC DATA:")
-                        print("-"*30)
-                        for key, value in fields.items():
-                            print(f"   {key}: {value}")
-                    else:
-                        print("\n⚠️ No fields extracted")
-                        print(f"   Raw result: {json.dumps(result_data, indent=2)}")
-                    
-                    return result
-                    
-                elif status == 'failed':
-                    print(f"\n❌ Task failed: {result.get('error')}")
-                    return None
-            else:
-                print(f"   Attempt {i+1}: Result not ready (HTTP {result_response.status_code})")
-                
+            r = requests.get(f"{API_URL}/result/{task_id}", timeout=10)
         except Exception as e:
-            print(f"   Attempt {i+1}: Error checking result: {e}")
-    
-    print("\n❌ Timeout waiting for task to complete")
+            print(f"  [{i}] Network error: {e}")
+            continue
+
+        if r.status_code == 404:
+            print(f"  [{i}] Task not found yet...")
+            if time.time() > deadline:
+                break
+            continue
+
+        data = r.json()
+        status = data.get("status", "unknown")
+        print(f"  [{i}] Status: {status}")
+
+        if status == "completed":
+            return data
+        elif status == "failed":
+            print(f"\n  ❌ Task failed: {data.get('error')}")
+            return data
+
+        if time.time() > deadline:
+            break
+
+    print(f"\n  ❌ Timeout ({MAX_WAIT}s) waiting for task {task_id}")
     return None
 
-def test_face_verification(cnic_path, selfie_path):
-    """Test face verification"""
-    
-    print("\n" + "="*50)
-    print("👤 Testing Face Verification")
-    print("="*50)
-    
-    # Check images
-    try:
-        with open(cnic_path, 'rb') as f:
-            cnic_data = f.read()
-        with open(selfie_path, 'rb') as f:
-            selfie_data = f.read()
-        print(f"✅ Loaded CNIC image ({len(cnic_data)} bytes)")
-        print(f"✅ Loaded selfie ({len(selfie_data)} bytes)")
-    except Exception as e:
-        print(f"❌ Cannot read images: {e}")
-        return None
-    
-    # Submit task
-    print("\n📤 Submitting verification task...")
-    files = {
-        'cnic_image': ('cnic.jpg', cnic_data, 'image/jpeg'),
-        'selfie_image': ('selfie.jpg', selfie_data, 'image/jpeg')
-    }
-    
-    try:
-        response = requests.post(f"{API_URL}/verify-face", files=files, timeout=10)
-        
-        if response.status_code != 200:
-            print(f"❌ API error: {response.status_code}")
-            print(f"   Response: {response.text}")
-            return None
-        
-        task = response.json()
-        task_id = task.get('task_id')
-        print(f"✅ Task submitted! Task ID: {task_id}")
-        
-    except Exception as e:
-        print(f"❌ Failed to submit: {e}")
-        return None
-    
-    # Poll for results
-    print("\n⏳ Waiting for verification...")
-    
-    for i in range(30):
-        time.sleep(2)
-        
-        try:
-            result_response = requests.get(f"{API_URL}/result/{task_id}", timeout=5)
-            
-            if result_response.status_code == 200:
-                result = result_response.json()
-                status = result.get('status')
-                
-                if status == 'completed':
-                    print("\n✅ VERIFICATION COMPLETED!")
-                    verification = result.get('result', {})
-                    print(f"   Match: {verification.get('final_verification')}")
-                    print(f"   Confidence: {verification.get('confidence', 'N/A')}%")
-                    return result
-                elif status == 'failed':
-                    print(f"\n❌ Verification failed: {result.get('error')}")
-                    return None
-                    
-        except Exception as e:
-            print(f"   Attempt {i+1}: Error: {e}")
-    
-    print("\n❌ Timeout waiting for verification")
-    return None
 
-def check_redis_queue():
-    """Check if there are tasks in queue (optional)"""
-    try:
-        response = requests.get(f"{API_URL}/health")
-        if response.status_code == 200:
-            health = response.json()
-            print(f"\n📊 API Status: Redis={health.get('redis')}")
-    except:
-        pass
+def pretty(data: dict):
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+# ─────────────────────── 1. CNIC back extraction ───────────────────────────
+
+def test_back_extraction(image_path: str):
+    print("\n" + "=" * 55)
+    print("  TEST: /extract-cnic-back")
+    print("=" * 55)
+
+    if not os.path.exists(image_path):
+        print(f"  ❌ File not found: {image_path}")
+        return False
+
+    print(f"  Image : {image_path}  ({os.path.getsize(image_path):,} bytes)")
+
+    with open(image_path, "rb") as f:
+        files = {"cnic_back_image": (os.path.basename(image_path), f, "image/jpeg")}
+        print(f"\n🚀 POST {API_URL}/extract-cnic-back")
+        r = requests.post(f"{API_URL}/extract-cnic-back", files=files, timeout=30)
+
+    print(f"   HTTP {r.status_code}")
+    if r.status_code not in (200, 202):
+        print(f"  ❌ Unexpected status: {r.text[:400]}")
+        return False
+
+    task = r.json()
+    task_id = task.get("task_id")
+    print(f"  task_id : {task_id}")
+    print(f"  status  : {task.get('status')}")
+
+    result = poll_result(task_id, "back-extraction")
+    if not result:
+        return False
+
+    if result.get("status") == "completed":
+        fields = result.get("result", {}).get("fields", {})
+        print("\n✅ Extracted Address Fields:")
+        print(f"  CNIC Number          : {fields.get('cnic_number')}")
+        print(f"  موجودہ پتہ (Current) : {fields.get('mojooda_pata_urdu')}")
+        print(f"  Current (Roman)      : {fields.get('mojooda_pata_roman')}")
+        print(f"  مستقل پتہ (Permanent): {fields.get('mustaqil_pata_urdu')}")
+        print(f"  Permanent (Roman)    : {fields.get('mustaqil_pata_roman')}")
+        print(f"  Barcode Number       : {fields.get('barcode_number')}")
+        print(f"  Confidence           : {fields.get('confidence')}")
+        return True
+
+    return False
+
+
+# ─────────────────────── 2. Face verification ──────────────────────────────
+
+def test_face_verify(cnic_path: str, selfie_path: str):
+    print("\n" + "=" * 55)
+    print("  TEST: /verify-face")
+    print("=" * 55)
+
+    for label, path in [("CNIC ", cnic_path), ("Selfie", selfie_path)]:
+        if not os.path.exists(path):
+            print(f"  ❌ File not found ({label}): {path}")
+            return False
+        print(f"  {label}: {path}  ({os.path.getsize(path):,} bytes)")
+
+    with open(cnic_path, "rb") as cf, open(selfie_path, "rb") as sf:
+        files = {
+            "cnic_image"  : (os.path.basename(cnic_path),   cf, "image/jpeg"),
+            "selfie_image": (os.path.basename(selfie_path), sf, "image/jpeg"),
+        }
+        print(f"\n🚀 POST {API_URL}/verify-face")
+        r = requests.post(f"{API_URL}/verify-face", files=files, timeout=30)
+
+    print(f"   HTTP {r.status_code}")
+    if r.status_code not in (200, 202):
+        print(f"  ❌ Unexpected status: {r.text[:400]}")
+        return False
+
+    task = r.json()
+    task_id = task.get("task_id")
+    print(f"  task_id : {task_id}")
+    print(f"  status  : {task.get('status')}")
+
+    result = poll_result(task_id, "face-verify")
+    if not result:
+        return False
+
+    if result.get("status") == "completed":
+        res = result.get("result", {})
+        print("\n✅ Face Verification Result:")
+
+        # Final verdict
+        verified = res.get("final_verification")
+        confidence = res.get("confidence")
+        methods = res.get("methods_tried", [])
+
+        verdict = "✅ MATCH" if verified else "❌ NO MATCH"
+        print(f"  Verdict    : {verdict}")
+        if confidence is not None:
+            print(f"  Similarity : {confidence:.2f}%")
+        print(f"  Methods    : {', '.join(methods) if methods else 'N/A'}")
+
+        # Per-method details
+        for method in ("face_recognition", "deepface", "opencv_histogram"):
+            if method in res:
+                m = res[method]
+                print(f"\n  [{method}]")
+                print(f"    is_match   : {m.get('is_match')}")
+                print(f"    similarity : {m.get('similarity')}")
+
+        return verified is not None
+
+    return False
+
+
+# ──────────────────────────────── main ─────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="CNIC API endpoint tester")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--back",   nargs=1,   metavar="CNIC_BACK",
+                       help="Test back-extraction only")
+    group.add_argument("--verify", nargs=2,   metavar=("CNIC_FRONT", "SELFIE"),
+                       help="Test face-verify only")
+    group.add_argument("--all",    nargs=3,
+                       metavar=("CNIC_BACK", "CNIC_FRONT", "SELFIE"),
+                       help="Run both tests")
+    args = parser.parse_args()
+
+    if not check_health():
+        print("❌ API unavailable — aborting.")
+        sys.exit(1)
+
+    results = {}
+
+    if args.back:
+        results["back_extraction"] = test_back_extraction(args.back[0])
+
+    elif args.verify:
+        results["face_verify"] = test_face_verify(args.verify[0], args.verify[1])
+
+    elif args.all:
+        results["back_extraction"] = test_back_extraction(args.all[0])
+        results["face_verify"]     = test_face_verify(args.all[1], args.all[2])
+
+    # Summary
+    print("\n" + "=" * 55)
+    print("  SUMMARY")
+    print("=" * 55)
+    for test, passed in results.items():
+        icon = "✅" if passed else "❌"
+        print(f"  {icon}  {test}")
+    print()
+
 
 if __name__ == "__main__":
-    print("="*50)
-    print("🚀 CNIC SYSTEM TEST")
-    print("="*50)
-    print(f"API URL: {API_URL}")
-    
-    # Check API health
-    if not test_health():
-        print("\n❌ Cannot proceed - API not reachable")
-        print("   Make sure your Railway API is deployed and running")
-        sys.exit(1)
-    
-    # Ask for test image
-    print("\n" + "="*50)
-    cnic_image = input("📷 Enter path to CNIC image file: ").strip()
-    
-    if cnic_image:
-        test_extract_cnic(cnic_image)
-    else:
-        print("⏭️ Skipping CNIC extraction test")
-    
-    # Ask for face verification test
-    print("\n" + "="*50)
-    verify = input("👤 Test face verification? (y/n): ").strip().lower()
-    
-    if verify == 'y':
-        cnic_img = input("CNIC image path: ").strip()
-        selfie_img = input("Selfie image path: ").strip()
-        if cnic_img and selfie_img:
-            test_face_verification(cnic_img, selfie_img)
-    
-    print("\n✨ Test complete!")
+    main()

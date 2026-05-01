@@ -347,9 +347,22 @@ def main():
                 elif task_type == "verify_face":
                     result = process_verify_face(task_data)
                     status = "completed" if "error" not in result else "failed"
-                    
+    
+    # Store in Redis (ALWAYS)
+                    redis_client.setex(f"task:{task_id}", 3600, json.dumps({
+                        "task_id": task_id,
+                        "status": status,
+                        "result": result if status == "completed" else None,
+                         "error": result.get("error") if status == "failed" else None,
+                        "completed_at": datetime.now().isoformat()
+                    }))
+    
+                    logger.info(f"✅ [FACE] Task {task_id} stored in Redis")
+    
+    # Send webhook if configured
                     if "webhook_url" in task_data:
                         send_webhook(task_data["webhook_url"], result, WORKER_API_KEY)
+
 
                 elif task_type == "extract_back":
                     # CNIC back-side: extract موجودہ پتہ + مستقل پتہ via Gemini
