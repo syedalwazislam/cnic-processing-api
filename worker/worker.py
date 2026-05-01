@@ -17,12 +17,11 @@ import redis
 # Get your free key at: https://aistudio.google.com/app/apikey
 # Set on EC2: export GEMINI_API_KEY="AIza..."
 try:
-    import google.generativeai as genai
+    from google import genai
     from PIL import Image as PILImage
     _GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
     if _GEMINI_KEY:
-        genai.configure(api_key=_GEMINI_KEY)
-        GEMINI_MODEL = genai.GenerativeModel("gemini-2.5-flash-lite")
+        GEMINI_CLIENT = genai.Client(api_key=_GEMINI_KEY)
         GEMINI_AVAILABLE = True
         logging.getLogger(__name__).info("✅ Gemini 2.5 Flash Lite ready for back-side OCR")
     else:
@@ -63,6 +62,26 @@ redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 logger.info("Loading CNIC Processor (this may take a moment)...")
 cnic_processor = CNICProcessor('runs/detect/train3/weights/best.pt')
 logger.info("✅ CNIC Processor loaded successfully!")
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuration
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+WORKER_API_KEY = os.getenv("WORKER_API_KEY", "your-secret-key")
+REDIS_QUEUE = "cnic_tasks"
+
+# ── JSON helper ───────────────────────────────────────────────────────────────
+def make_json_safe(obj):
+    """Recursively convert numpy types to native Python types for JSON serialization"""
+    if isinstance(obj, dict):
+        return {k: make_json_safe(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [make_json_safe(i) for i in obj]
+    elif hasattr(obj, 'item'):   # catches numpy.bool_, numpy.float32, numpy.int64 etc.
+        return obj.item()
+    return obj
 
 def decode_base64_image(base64_str: str) -> np.ndarray:
     """Convert base64 to OpenCV image"""
@@ -161,7 +180,7 @@ def process_verify_face(task_data: dict):
         # Verify faces
         verification = verify_face_live(cnic_picture, live_face)
         
-        return verification
+        return make_json_safe(verification)
         
     except Exception as e:
         logger.error(f"Error in verify_face: {e}", exc_info=True)
@@ -247,12 +266,8 @@ def process_extract_cnic_back(task_data: dict):
         logger.info(f"[BACK] Task {task_id} — image size: {pil_image.size}")
 
         # Call Gemini 1.5 Flash
-        response = GEMINI_MODEL.generate_content(
-            [_BACK_PROMPT, pil_image],
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.1,
-                max_output_tokens=1024,
-            ),
+        response = GEMINI_CLIENT.models.generate_content(
+            model="gemini-2.5-flash-lite", contents=[_BACK_PROMPT, pil_image],
         )
         raw_text = response.text.strip()
         logger.info(f"[BACK] Gemini raw response: {raw_text}")

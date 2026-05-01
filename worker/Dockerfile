@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir \
     python-bidi==0.4.2 \
     pandas==2.0.3 \
     face-recognition==1.3.0 \
-    google-generativeai>=0.5.0 \
+    google-genai>=0.5.0 \
     pillow>=9.0.0
 # Copy application files
 COPY worker.py .
