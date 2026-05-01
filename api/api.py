@@ -196,6 +196,37 @@ async def extract_cnic(
         message="CNIC extraction task has been queued"
     )
 
+@app.post("/extract-cnic-back")
+async def extract_cnic_back(cnic_back_image: UploadFile = File(...)):
+    """
+    Extract Mojooda Pata (current address) and Mustaqil Pata (permanent address)
+    from the back side of a Pakistani CNIC.
+    """
+    try:
+        image_data = await cnic_back_image.read()
+ 
+        task_id = str(uuid.uuid4())
+ 
+        task_payload = {
+            "task_id":   task_id,
+            "task_type": "extract_back",                          # ← new task type
+            "image":     base64.b64encode(image_data).decode(),
+            "filename":  cnic_back_image.filename or "cnic_back.jpg",
+        }
+ 
+        # Push to the same Redis queue your worker already reads
+        redis_client.lpush("cnic_tasks", json.dumps(task_payload))
+ 
+        return {
+            "task_id": task_id,
+            "status":  "queued",
+            "message": "CNIC back submitted for address extraction",
+        }
+ 
+    except Exception as e:
+        return {"error": str(e)}, 500
+ 
+
 @app.post("/verify-face", response_model=TaskResponse)
 async def verify_face(
     background_tasks: BackgroundTasks,
